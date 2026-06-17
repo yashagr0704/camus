@@ -2,101 +2,92 @@ package com.kafkaclone;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * PHASE 2/3 -- owns one CommitLog per topic and one ConsumerOffsetStore
- * per (topic, consumer) pair, plus an in-memory map of "delivered but
- * not yet acknowledged" messages, which gives us at-least-once delivery:
- * calling consume() again before ack() just redelivers the same message.
- *
- * PHASE 5 -- publish/consume/ack are now synchronized on this Broker
- * instance, making each one atomic as a whole now that multiple client
- * threads can call in concurrently. This is a deliberately coarse,
- * whole-broker lock; partitions (a later phase) will let us shard it so
- * unrelated topics/partitions stop blocking each other.
+ * A topic is now PARTITION_COUNT independent logs, not one. This class
+ * is no longer synchronized anywhere -- there's no single shared lock
+ * left. Real locking happens inside CommitLog (per partition) and
+ * PartitionConsumer (per partition+consumer); this class only handles
+ * looking up or lazily creating the right one, which ConcurrentHashMap
+ * makes safe on its own.
  */
 public class Broker {
 
-    private final Map<String, CommitLog> topicLogs = new HashMap<>();
-    private final Map<String, ConsumerOffsetStore> offsetStores = new HashMap<>();
-    private final Map<String, PendingDelivery> pendingDeliveries = new HashMap<>();
+    private static final int PARTITION_COUNT = 3;
+
+    private final Map<String, CommitLog> partitionLogs = new ConcurrentHashMap<>();
+    private final Map<String, PartitionConsumer> consumers = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> roundRobinCounters = new ConcurrentHashMap<>();
     private final String dataDirectory;
 
     public Broker(String dataDirectory) {
         this.dataDirectory = dataDirectory;
     }
 
-    public synchronized long publish(String topic, String message) throws IOException {
-        return logFor(topic).append(message.getBytes(StandardCharsets.UTF_8));
+    /** No key: spread messages evenly across partitions, in turn. */
+    public PublishResult publish(String topic, String message) throws IOException {
+        int partition = nextRoundRobinPartition(topic);
+        return publishToPartition(topic, partition, message);
     }
 
-    /**
-     * Delivers the next unread message to a named consumer, or
-     * redelivers the consumer's already-pending message if it hasn't
-     * been acknowledged yet. Returns null if the consumer is caught up
-     * to the end of the log.
-     */
-    public synchronized ConsumeResult consume(String topic, String consumerName) throws IOException {
-        String key = key(topic, consumerName);
+    /** Key given: every message with this exact key always lands on the same partition. */
+    public PublishResult publish(String topic, String key, String message) throws IOException {
+        int partition = partitionForKey(key);
+        return publishToPartition(topic, partition, message);
+    }
 
-        PendingDelivery pending = pendingDeliveries.get(key);
-        if (pending != null) {
-            return new ConsumeResult(pending.message(), true);
+    public PartitionConsumer.ConsumeResult consume(String topic, int partition, String consumerName) throws IOException {
+        return consumerFor(topic, partition, consumerName).consume();
+    }
+
+    public boolean ack(String topic, int partition, String consumerName) throws IOException {
+        return consumerFor(topic, partition, consumerName).ack();
+    }
+
+    private PublishResult publishToPartition(String topic, int partition, String message) throws IOException {
+        long offset = logFor(topic, partition).append(message.getBytes(StandardCharsets.UTF_8));
+        return new PublishResult(partition, offset);
+    }
+
+    // Math.floorMod, not plain %: hashCode() can be negative, and %
+    // keeps the sign of its left operand, so naive "hash % count" can
+    // itself come out negative. floorMod always lands in [0, count).
+    private int partitionForKey(String key) {
+        return Math.floorMod(key.hashCode(), PARTITION_COUNT);
+    }
+
+    private int nextRoundRobinPartition(String topic) {
+        AtomicInteger counter = roundRobinCounters.computeIfAbsent(topic, t -> new AtomicInteger(0));
+        return Math.floorMod(counter.getAndIncrement(), PARTITION_COUNT);
+    }
+
+    private CommitLog logFor(String topic, int partition) {
+        String key = topic + "-" + partition;
+        return partitionLogs.computeIfAbsent(key, this::openLog);
+    }
+
+    private PartitionConsumer consumerFor(String topic, int partition, String consumerName) {
+        String partitionKey = topic + "-" + partition;
+        String key = partitionKey + "::" + consumerName;
+        return consumers.computeIfAbsent(key, k -> {
+            CommitLog log = logFor(topic, partition);
+            ConsumerOffsetStore store = new ConsumerOffsetStore(dataDirectory, partitionKey, consumerName);
+            return new PartitionConsumer(log, store);
+        });
+    }
+
+    private CommitLog openLog(String fileBaseName) {
+        try {
+            return new CommitLog(dataDirectory + "/" + fileBaseName + ".log");
+        } catch (IOException e) {
+            // computeIfAbsent's function can't declare checked exceptions,
+            // so we wrap it -- Server's catch-all handles this surface.
+            throw new RuntimeException("failed to open log for " + fileBaseName, e);
         }
-
-        long committedOffset = offsetStoreFor(topic, consumerName).load();
-        CommitLog log = logFor(topic);
-
-        if (committedOffset >= log.endOffset()) {
-            return null; // caught up, nothing new yet
-        }
-
-        byte[] payload = log.read(committedOffset);
-        String message = new String(payload, StandardCharsets.UTF_8);
-        long nextOffset = committedOffset + 4 + payload.length;
-
-        pendingDeliveries.put(key, new PendingDelivery(message, nextOffset));
-        return new ConsumeResult(message, false);
     }
 
-    /**
-     * Confirms the consumer's currently pending message is processed:
-     * the durable committed offset moves forward and the in-memory
-     * pending marker clears.
-     */
-    public synchronized boolean ack(String topic, String consumerName) throws IOException {
-        String key = key(topic, consumerName);
-        PendingDelivery pending = pendingDeliveries.get(key);
-        if (pending == null) {
-            return false; // nothing outstanding to acknowledge
-        }
-        offsetStoreFor(topic, consumerName).save(pending.nextOffset());
-        pendingDeliveries.remove(key);
-        return true;
-    }
-
-    private String key(String topic, String consumerName) {
-        return topic + "::" + consumerName;
-    }
-
-    private CommitLog logFor(String topic) throws IOException {
-        CommitLog log = topicLogs.get(topic);
-        if (log == null) {
-            log = new CommitLog(dataDirectory + "/" + topic + ".log");
-            topicLogs.put(topic, log);
-        }
-        return log;
-    }
-
-    private ConsumerOffsetStore offsetStoreFor(String topic, String consumerName) {
-        return offsetStores.computeIfAbsent(
-                key(topic, consumerName),
-                k -> new ConsumerOffsetStore(dataDirectory, topic, consumerName));
-    }
-
-    private record PendingDelivery(String message, long nextOffset) {}
-
-    public record ConsumeResult(String message, boolean redelivered) {}
+    public record PublishResult(int partition, long offset) {}
 }

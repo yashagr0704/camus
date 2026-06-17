@@ -87,22 +87,33 @@ public class Server {
                     return "PONG";
 
                 case "PUBLISH": {
-                    // argument shape: "<topic> <message text>"
+                    // round-robin: "<topic> <message>"
                     String[] pubParts = argument.split(" ", 2);
                     if (pubParts.length < 2) {
                         return "ERROR: usage PUBLISH <topic> <message>";
                     }
-                    long offset = broker.publish(pubParts[0], pubParts[1]);
-                    return "OK " + offset;
+                    Broker.PublishResult result = broker.publish(pubParts[0], pubParts[1]);
+                    return "OK " + result.partition() + " " + result.offset();
+                }
+
+                case "PUBLISHKEY": {
+                    // sticky-by-key: "<topic> <key> <message>"
+                    String[] pkParts = argument.split(" ", 3);
+                    if (pkParts.length < 3) {
+                        return "ERROR: usage PUBLISHKEY <topic> <key> <message>";
+                    }
+                    Broker.PublishResult result = broker.publish(pkParts[0], pkParts[1], pkParts[2]);
+                    return "OK " + result.partition() + " " + result.offset();
                 }
 
                 case "CONSUME": {
-                    // argument shape: "<topic> <consumerName>"
-                    String[] conParts = argument.split(" ", 2);
-                    if (conParts.length < 2) {
-                        return "ERROR: usage CONSUME <topic> <consumerName>";
+                    // now requires the partition explicitly: "<topic> <partition> <consumerName>"
+                    String[] conParts = argument.split(" ", 3);
+                    if (conParts.length < 3) {
+                        return "ERROR: usage CONSUME <topic> <partition> <consumerName>";
                     }
-                    Broker.ConsumeResult result = broker.consume(conParts[0], conParts[1]);
+                    int partition = Integer.parseInt(conParts[1]);
+                    PartitionConsumer.ConsumeResult result = broker.consume(conParts[0], partition, conParts[2]);
                     if (result == null) {
                         return "EOF";
                     }
@@ -111,12 +122,12 @@ public class Server {
                 }
 
                 case "ACK": {
-                    // argument shape: "<topic> <consumerName>"
-                    String[] ackParts = argument.split(" ", 2);
-                    if (ackParts.length < 2) {
-                        return "ERROR: usage ACK <topic> <consumerName>";
+                    String[] ackParts = argument.split(" ", 3);
+                    if (ackParts.length < 3) {
+                        return "ERROR: usage ACK <topic> <partition> <consumerName>";
                     }
-                    boolean acked = broker.ack(ackParts[0], ackParts[1]);
+                    int partition = Integer.parseInt(ackParts[1]);
+                    boolean acked = broker.ack(ackParts[0], partition, ackParts[2]);
                     return acked ? "OK" : "ERROR: nothing to acknowledge";
                 }
 
@@ -130,6 +141,8 @@ public class Server {
             return "ERROR: " + e.getMessage();
         } catch (NumberFormatException e) {
             return "ERROR: bad argument";
+        } catch (RuntimeException e) {
+            return "ERROR: " + e.getMessage();
         }
     }
 }

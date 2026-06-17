@@ -20,9 +20,8 @@ public class Client {
              DataOutputStream out = new DataOutputStream(socket.getOutputStream());
              DataInputStream in = new DataInputStream(socket.getInputStream());
              Scanner keyboard = new Scanner(System.in)) {
-
             System.out.println("Connected to " + host + ":" + port
-                    + ". Try: PING, PUBLISH orders hello, CONSUME orders alice, ACK orders alice, QUIT");
+                    + ". Try: PING, PUBLISH orders hello, PUBLISHKEY orders user42 hello, CONSUME orders 0 alice, ACK orders 0 alice, QUIT");
 
             while (true) {
                 System.out.print("> ");
