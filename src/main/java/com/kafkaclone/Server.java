@@ -7,6 +7,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,7 +27,7 @@ public class Server {
     private static final int PORT = 9092;
     private static final String DATA_DIR = "data";
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws IOException, SQLException {
         Files.createDirectories(Path.of(DATA_DIR));
         Broker broker = new Broker(DATA_DIR);
 
@@ -200,7 +201,10 @@ public class Server {
             return "ERROR: bad argument";
         } catch (RuntimeException e) {
             return "ERROR: " + e.getMessage();
+        } catch (SQLException e) {
+            return "ERROR: " + e.getMessage();
         }
+
     }
 
     private static String formatPartitions(List<Integer> partitions) {

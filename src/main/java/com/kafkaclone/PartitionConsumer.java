@@ -2,33 +2,33 @@ package com.kafkaclone;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 
-/**
- * One of these exists per (topic, partition, consumerName) triple,
- * created lazily. consume()/ack() are synchronized on THIS object, not
- * on the whole Broker -- a lock per (partition, consumer) pair instead
- * of one lock for everything, so unrelated consumers never wait on
- * each other.
- */
 public class PartitionConsumer {
 
     private final CommitLog log;
-    private final ConsumerOffsetStore offsetStore;
-    private PendingDelivery pending; // in-memory only, never persisted
+    private final MetadataStore metadataStore;
+    private final String topic;
+    private final int partition;
+    private final String consumerName;
+    private PendingDelivery pending;
 
-    public PartitionConsumer(CommitLog log, ConsumerOffsetStore offsetStore) {
+    public PartitionConsumer(CommitLog log, MetadataStore metadataStore, String topic, int partition, String consumerName) {
         this.log = log;
-        this.offsetStore = offsetStore;
+        this.metadataStore = metadataStore;
+        this.topic = topic;
+        this.partition = partition;
+        this.consumerName = consumerName;
     }
 
-    public synchronized ConsumeResult consume() throws IOException {
+    public synchronized ConsumeResult consume() throws IOException, SQLException {
         if (pending != null) {
             return new ConsumeResult(pending.message(), true);
         }
 
-        long committedOffset = offsetStore.load();
+        long committedOffset = metadataStore.loadOffset(topic, partition, consumerName);
         if (committedOffset >= log.endOffset()) {
-            return null; // caught up
+            return null;
         }
 
         byte[] payload = log.read(committedOffset);
@@ -39,11 +39,11 @@ public class PartitionConsumer {
         return new ConsumeResult(message, false);
     }
 
-    public synchronized boolean ack() throws IOException {
+    public synchronized boolean ack() throws IOException, SQLException {
         if (pending == null) {
             return false;
         }
-        offsetStore.save(pending.nextOffset());
+        metadataStore.saveOffset(topic, partition, consumerName, pending.nextOffset());
         pending = null;
         return true;
     }
