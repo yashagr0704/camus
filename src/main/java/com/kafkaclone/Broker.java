@@ -2,18 +2,11 @@ package com.kafkaclone;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * A topic is now PARTITION_COUNT independent logs, not one. This class
- * is no longer synchronized anywhere -- there's no single shared lock
- * left. Real locking happens inside CommitLog (per partition) and
- * PartitionConsumer (per partition+consumer); this class only handles
- * looking up or lazily creating the right one, which ConcurrentHashMap
- * makes safe on its own.
- */
 public class Broker {
 
     private static final int PARTITION_COUNT = 3;
@@ -21,19 +14,18 @@ public class Broker {
     private final Map<String, CommitLog> partitionLogs = new ConcurrentHashMap<>();
     private final Map<String, PartitionConsumer> consumers = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> roundRobinCounters = new ConcurrentHashMap<>();
+    private final Map<String, ConsumerGroup> groups = new ConcurrentHashMap<>();
     private final String dataDirectory;
 
     public Broker(String dataDirectory) {
         this.dataDirectory = dataDirectory;
     }
 
-    /** No key: spread messages evenly across partitions, in turn. */
     public PublishResult publish(String topic, String message) throws IOException {
         int partition = nextRoundRobinPartition(topic);
         return publishToPartition(topic, partition, message);
     }
 
-    /** Key given: every message with this exact key always lands on the same partition. */
     public PublishResult publish(String topic, String key, String message) throws IOException {
         int partition = partitionForKey(key);
         return publishToPartition(topic, partition, message);
@@ -47,15 +39,24 @@ public class Broker {
         return consumerFor(topic, partition, consumerName).ack();
     }
 
+    public List<Integer> joinGroup(String topic, String groupName, String memberId) {
+        return groupFor(topic, groupName).join(memberId);
+    }
+
+    public void leaveGroup(String topic, String groupName, String memberId) {
+        groupFor(topic, groupName).leave(memberId);
+    }
+
+    public List<Integer> assignmentFor(String topic, String groupName, String memberId) {
+        return groupFor(topic, groupName).assignmentFor(memberId);
+    }
+
     private PublishResult publishToPartition(String topic, int partition, String message) throws IOException {
         long offset = logFor(topic, partition).append(message.getBytes(StandardCharsets.UTF_8));
         return new PublishResult(partition, offset);
     }
 
-    // Math.floorMod, not plain %: hashCode() can be negative, and %
-    // keeps the sign of its left operand, so naive "hash % count" can
-    // itself come out negative. floorMod always lands in [0, count).
-    private int partitionForKey(String key) {
+    public int partitionForKey(String key) {
         return Math.floorMod(key.hashCode(), PARTITION_COUNT);
     }
 
@@ -79,12 +80,15 @@ public class Broker {
         });
     }
 
+    private ConsumerGroup groupFor(String topic, String groupName) {
+        String key = topic + "::" + groupName;
+        return groups.computeIfAbsent(key, k -> new ConsumerGroup(PARTITION_COUNT));
+    }
+
     private CommitLog openLog(String fileBaseName) {
         try {
             return new CommitLog(dataDirectory + "/" + fileBaseName + ".log");
         } catch (IOException e) {
-            // computeIfAbsent's function can't declare checked exceptions,
-            // so we wrap it -- Server's catch-all handles this surface.
             throw new RuntimeException("failed to open log for " + fileBaseName, e);
         }
     }

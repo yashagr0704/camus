@@ -7,6 +7,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -131,6 +132,62 @@ public class Server {
                     return acked ? "OK" : "ERROR: nothing to acknowledge";
                 }
 
+                case "JOIN": {
+                    // "<topic> <groupName> <memberId>"
+                    String[] joinParts = argument.split(" ", 3);
+                    if (joinParts.length < 3) {
+                        return "ERROR: usage JOIN <topic> <groupName> <memberId>";
+                    }
+                    List<Integer> assigned = broker.joinGroup(joinParts[0], joinParts[1], joinParts[2]);
+                    return "ASSIGNED " + formatPartitions(assigned);
+                }
+
+                case "LEAVE": {
+                    String[] leaveParts = argument.split(" ", 3);
+                    if (leaveParts.length < 3) {
+                        return "ERROR: usage LEAVE <topic> <groupName> <memberId>";
+                    }
+                    broker.leaveGroup(leaveParts[0], leaveParts[1], leaveParts[2]);
+                    return "OK";
+                }
+
+                case "ASSIGNMENT": {
+                    String[] asParts = argument.split(" ", 3);
+                    if (asParts.length < 3) {
+                        return "ERROR: usage ASSIGNMENT <topic> <groupName> <memberId>";
+                    }
+                    List<Integer> assigned = broker.assignmentFor(asParts[0], asParts[1], asParts[2]);
+                    return "ASSIGNED " + formatPartitions(assigned);
+                }
+
+                case "CONSUMEGROUP": {
+                    // "<topic> <groupName> <memberId>" -- looks up which partition(s)
+                    // this member currently owns, and returns the next available
+                    // message from among them, tagged with which partition it actually
+                    // came from (you'll need that exact number to ACK afterward).
+                    String[] cgParts = argument.split(" ", 3);
+                    if (cgParts.length < 3) {
+                        return "ERROR: usage CONSUMEGROUP <topic> <groupName> <memberId>";
+                    }
+                    String topic = cgParts[0];
+                    String groupName = cgParts[1];
+                    String memberId = cgParts[2];
+
+                    List<Integer> ownedPartitions = broker.assignmentFor(topic, groupName, memberId);
+                    if (ownedPartitions.isEmpty()) {
+                        return "EOF"; // this member currently owns nothing at all
+                    }
+
+                    for (int partition : ownedPartitions) {
+                        PartitionConsumer.ConsumeResult result = broker.consume(topic, partition, groupName);
+                        if (result != null) {
+                            String tag = result.redelivered() ? "REDELIVERED" : "NEW";
+                            return "MESSAGE " + partition + " " + tag + " " + result.message();
+                        }
+                    }
+                    return "EOF"; // every partition this member owns is caught up
+                }
+
                 case "QUIT":
                     return "BYE";
 
@@ -144,5 +201,17 @@ public class Server {
         } catch (RuntimeException e) {
             return "ERROR: " + e.getMessage();
         }
+    }
+
+    private static String formatPartitions(List<Integer> partitions) {
+        if (partitions.isEmpty()) {
+            return "NONE";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < partitions.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(partitions.get(i));
+        }
+        return sb.toString();
     }
 }
