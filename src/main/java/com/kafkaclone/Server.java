@@ -12,16 +12,6 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * PHASE 1 -- runs forever, accepting client after client.
- * PHASE 2/3 -- PUBLISH/CONSUME/ACK are backed by a real Broker instead
- * of toy in-memory responses.
- * PHASE 4 -- communication uses length-prefixed binary framing
- * (Framing.java) instead of readLine()/println().
- * PHASE 5 -- each accepted connection is handed off to its own virtual
- * thread, so one slow client can no longer block every other client
- * from connecting.
- */
 public class Server {
 
     private static final int PORT = 9092;
@@ -30,20 +20,20 @@ public class Server {
     public static void main(String[] args) throws IOException, SQLException {
         Files.createDirectories(Path.of(DATA_DIR));
         Broker broker = new Broker(DATA_DIR);
+        runServer(PORT, broker);
+    }
 
-        try (ServerSocket serverSocket = new ServerSocket(PORT);
+    /** Pulled out so FollowerServer can run the exact same accept loop on its own port/broker. */
+    public static void runServer(int port, Broker broker) throws IOException {
+        try (ServerSocket serverSocket = new ServerSocket(port);
              ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
 
-            System.out.println("Server listening on port " + PORT + "...");
+            System.out.println("Server listening on port " + port + "...");
 
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 System.out.println("Client connected: " + clientSocket.getRemoteSocketAddress());
 
-                // submit() hands this connection's whole lifetime off to a
-                // brand-new virtual thread and returns immediately -- the
-                // loop comes straight back to accept() without waiting
-                // for this client to do anything at all.
                 executor.submit(() -> {
                     try {
                         handleClient(clientSocket, broker);
@@ -73,10 +63,6 @@ public class Server {
         }
     }
 
-    /**
-     * The whole "protocol": one frame of text, first word is the command
-     * name, everything after it is the argument.
-     */
     private static String handleCommand(String line, Broker broker) {
         String trimmed = line.trim();
         String[] parts = trimmed.split(" ", 2);
@@ -89,7 +75,6 @@ public class Server {
                     return "PONG";
 
                 case "PUBLISH": {
-                    // round-robin: "<topic> <message>"
                     String[] pubParts = argument.split(" ", 2);
                     if (pubParts.length < 2) {
                         return "ERROR: usage PUBLISH <topic> <message>";
@@ -99,7 +84,6 @@ public class Server {
                 }
 
                 case "PUBLISHKEY": {
-                    // sticky-by-key: "<topic> <key> <message>"
                     String[] pkParts = argument.split(" ", 3);
                     if (pkParts.length < 3) {
                         return "ERROR: usage PUBLISHKEY <topic> <key> <message>";
@@ -108,8 +92,28 @@ public class Server {
                     return "OK " + result.partition() + " " + result.offset();
                 }
 
+                case "PUBLISHACKALL": {
+                    // "<topic> <message>" -- blocks until a follower
+                    // confirms it has this exact record, or fails after
+                    // a fixed timeout. The visible CAP trade-off.
+                    String[] paaParts = argument.split(" ", 2);
+                    if (paaParts.length < 2) {
+                        return "ERROR: usage PUBLISHACKALL <topic> <message>";
+                    }
+                    Broker.PublishResult result = broker.publishWithAck(paaParts[0], paaParts[1], 5000);
+                    return "OK " + result.partition() + " " + result.offset();
+                }
+
+                case "PARTITIONFOR": {
+                    String[] pfParts = argument.split(" ", 2);
+                    if (pfParts.length < 2) {
+                        return "ERROR: usage PARTITIONFOR <topic> <key>";
+                    }
+                    int partition = broker.partitionForKey(pfParts[1]);
+                    return "PARTITION " + partition;
+                }
+
                 case "CONSUME": {
-                    // now requires the partition explicitly: "<topic> <partition> <consumerName>"
                     String[] conParts = argument.split(" ", 3);
                     if (conParts.length < 3) {
                         return "ERROR: usage CONSUME <topic> <partition> <consumerName>";
@@ -133,8 +137,31 @@ public class Server {
                     return acked ? "OK" : "ERROR: nothing to acknowledge";
                 }
 
+                case "CONSUMEKEY": {
+                    String[] ckParts = argument.split(" ", 3);
+                    if (ckParts.length < 3) {
+                        return "ERROR: usage CONSUMEKEY <topic> <key> <consumerName>";
+                    }
+                    int partition = broker.partitionForKey(ckParts[1]);
+                    PartitionConsumer.ConsumeResult result = broker.consume(ckParts[0], partition, ckParts[2]);
+                    if (result == null) {
+                        return "EOF";
+                    }
+                    String tag = result.redelivered() ? "REDELIVERED" : "NEW";
+                    return "MESSAGE " + tag + " " + result.message();
+                }
+
+                case "ACKKEY": {
+                    String[] akParts = argument.split(" ", 3);
+                    if (akParts.length < 3) {
+                        return "ERROR: usage ACKKEY <topic> <key> <consumerName>";
+                    }
+                    int partition = broker.partitionForKey(akParts[1]);
+                    boolean acked = broker.ack(akParts[0], partition, akParts[2]);
+                    return acked ? "OK" : "ERROR: nothing to acknowledge";
+                }
+
                 case "JOIN": {
-                    // "<topic> <groupName> <memberId>"
                     String[] joinParts = argument.split(" ", 3);
                     if (joinParts.length < 3) {
                         return "ERROR: usage JOIN <topic> <groupName> <memberId>";
@@ -162,10 +189,6 @@ public class Server {
                 }
 
                 case "CONSUMEGROUP": {
-                    // "<topic> <groupName> <memberId>" -- looks up which partition(s)
-                    // this member currently owns, and returns the next available
-                    // message from among them, tagged with which partition it actually
-                    // came from (you'll need that exact number to ACK afterward).
                     String[] cgParts = argument.split(" ", 3);
                     if (cgParts.length < 3) {
                         return "ERROR: usage CONSUMEGROUP <topic> <groupName> <memberId>";
@@ -176,9 +199,8 @@ public class Server {
 
                     List<Integer> ownedPartitions = broker.assignmentFor(topic, groupName, memberId);
                     if (ownedPartitions.isEmpty()) {
-                        return "EOF"; // this member currently owns nothing at all
+                        return "EOF";
                     }
-
                     for (int partition : ownedPartitions) {
                         PartitionConsumer.ConsumeResult result = broker.consume(topic, partition, groupName);
                         if (result != null) {
@@ -186,7 +208,37 @@ public class Server {
                             return "MESSAGE " + partition + " " + tag + " " + result.message();
                         }
                     }
-                    return "EOF"; // every partition this member owns is caught up
+                    return "EOF";
+                }
+
+                case "FETCH": {
+                    // "<topic> <partition> <offset>" -- raw read, no
+                    // consumer bookkeeping. What followers use.
+                    String[] fetchParts = argument.split(" ", 3);
+                    if (fetchParts.length < 3) {
+                        return "ERROR: usage FETCH <topic> <partition> <offset>";
+                    }
+                    int partition = Integer.parseInt(fetchParts[1]);
+                    long offset = Long.parseLong(fetchParts[2]);
+                    Broker.FetchResult result = broker.fetch(fetchParts[0], partition, offset);
+                    if (result == null) {
+                        return "EOF";
+                    }
+                    return "RECORD " + result.nextOffset() + " " + result.message();
+                }
+
+                case "REPLICATED": {
+                    // "<topic> <partition> <offset>" -- a follower
+                    // reporting how far it's caught up, unblocking any
+                    // PUBLISHACKALL waiting on it.
+                    String[] repParts = argument.split(" ", 3);
+                    if (repParts.length < 3) {
+                        return "ERROR: usage REPLICATED <topic> <partition> <offset>";
+                    }
+                    int partition = Integer.parseInt(repParts[1]);
+                    long offset = Long.parseLong(repParts[2]);
+                    broker.reportReplicated(repParts[0], partition, offset);
+                    return "OK";
                 }
 
                 case "QUIT":
@@ -199,12 +251,14 @@ public class Server {
             return "ERROR: " + e.getMessage();
         } catch (NumberFormatException e) {
             return "ERROR: bad argument";
-        } catch (RuntimeException e) {
-            return "ERROR: " + e.getMessage();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return "ERROR: interrupted while waiting for replication";
         } catch (SQLException e) {
             return "ERROR: " + e.getMessage();
+        } catch (RuntimeException e) {
+            return "ERROR: " + e.getMessage();
         }
-
     }
 
     private static String formatPartitions(List<Integer> partitions) {
