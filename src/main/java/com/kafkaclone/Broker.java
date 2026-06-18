@@ -16,6 +16,7 @@ public class Broker {
     private final Map<String, PartitionConsumer> consumers = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> roundRobinCounters = new ConcurrentHashMap<>();
     private final Map<String, ConsumerGroup> groups = new ConcurrentHashMap<>();
+    private final ReplicationTracker replicationTracker = new ReplicationTracker();
     private final MetadataStore metadataStore;
     private final String dataDirectory;
 
@@ -32,6 +33,21 @@ public class Broker {
     public PublishResult publish(String topic, String key, String message) throws IOException {
         int partition = partitionForKey(key);
         return publishToPartition(topic, partition, message);
+    }
+
+    /**
+     * acks=all: writes locally exactly like publish(), then blocks until
+     * a follower has confirmed it has this exact record, or throws if
+     * the timeout elapses first -- the CAP trade-off, made visible.
+     */
+    public PublishResult publishWithAck(String topic, String message, long timeoutMillis) throws IOException, InterruptedException {
+        PublishResult result = publish(topic, message);
+        long targetOffset = result.offset() + 4 + message.getBytes(StandardCharsets.UTF_8).length;
+        boolean caughtUp = replicationTracker.waitForReplication(topic, result.partition(), targetOffset, timeoutMillis);
+        if (!caughtUp) {
+            throw new IOException("timed out waiting for replication acknowledgment");
+        }
+        return result;
     }
 
     public PartitionConsumer.ConsumeResult consume(String topic, int partition, String consumerName) throws IOException, SQLException {
@@ -52,6 +68,27 @@ public class Broker {
 
     public List<Integer> assignmentFor(String topic, String groupName, String memberId) {
         return groupFor(topic, groupName).assignmentFor(memberId);
+    }
+
+    /** Raw read by exact offset -- no consumer name, no pending/ack bookkeeping. What FETCH uses. */
+    public FetchResult fetch(String topic, int partition, long offset) throws IOException {
+        CommitLog log = logFor(topic, partition);
+        if (offset >= log.endOffset()) {
+            return null;
+        }
+        byte[] payload = log.read(offset);
+        String message = new String(payload, StandardCharsets.UTF_8);
+        long nextOffset = offset + 4 + payload.length;
+        return new FetchResult(message, nextOffset);
+    }
+
+    /** Appends directly to a SPECIFIC partition with no partition selection -- what a follower uses to mirror exactly what the leader wrote. */
+    public void appendReplicated(String topic, int partition, String message) throws IOException {
+        logFor(topic, partition).append(message.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public void reportReplicated(String topic, int partition, long offset) {
+        replicationTracker.reportReplicated(topic, partition, offset);
     }
 
     private PublishResult publishToPartition(String topic, int partition, String message) throws IOException {
@@ -99,4 +136,5 @@ public class Broker {
     }
 
     public record PublishResult(int partition, long offset) {}
+    public record FetchResult(String message, long nextOffset) {}
 }
