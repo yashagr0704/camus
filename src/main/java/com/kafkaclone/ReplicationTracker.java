@@ -3,11 +3,7 @@ package com.kafkaclone;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * PHASE 9 -- lives on the LEADER. Tracks, per partition, the highest
- * offset any follower has confirmed it has replicated. PUBLISHACKALL
- * polls this until the just-written offset is covered, or times out.
- */
+
 public class ReplicationTracker {
 
     private final Map<String, Long> replicatedOffsets = new ConcurrentHashMap<>();
@@ -23,7 +19,6 @@ public class ReplicationTracker {
         return replicatedOffsets.getOrDefault(topic + "-" + partition, 0L);
     }
 
-    /** Polls until the follower has caught up to targetOffset, or the timeout elapses. */
     public boolean waitForReplication(String topic, int partition, long targetOffset, long timeoutMillis) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMillis;
         while (System.currentTimeMillis() < deadline) {

@@ -4,16 +4,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 
-/**
- * PHASE 2 -- the append-only commit log.
- *
- * Each record on disk is stored as:
- *     [4 bytes: length of payload, big-endian int] [payload bytes]
- *
- * "Offset" here is the literal byte position where a record's
- * length-prefix begins, not a logical record number -- a deliberate
- * simplification versus real Kafka's logical-offset + index-file design.
- */
+
 public class CommitLog implements AutoCloseable {
 
     private final RandomAccessFile file;
@@ -25,10 +16,6 @@ public class CommitLog implements AutoCloseable {
         this.file.seek(this.file.length());
     }
 
-    /**
-     * Appends a record and returns the offset it was written at. Callers
-     * use that returned offset to read this exact record back later.
-     */
     public synchronized long append(byte[] payload) throws IOException {
         long offset = file.getFilePointer();
 
@@ -48,7 +35,6 @@ public class CommitLog implements AutoCloseable {
         return offset;
     }
 
-    /** Reads back the record whose length-prefix starts at this offset. */
     public synchronized byte[] read(long offset) throws IOException {
         file.seek(offset);
 
@@ -62,7 +48,6 @@ public class CommitLog implements AutoCloseable {
         return payload;
     }
 
-    /** The offset one past the last record written. */
     public synchronized long endOffset() throws IOException {
         return file.length();
     }

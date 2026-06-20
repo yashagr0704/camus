@@ -6,11 +6,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
-/**
- * PHASE 4 -- length-prefixed framing: write a 4-byte length, then exactly
- * that many bytes. Replaces readLine()/println() used in Phases 1-3, so
- * messages can now contain newlines or arbitrary bytes safely.
- */
 public final class Framing {
 
     // A sane upper bound so a bogus or malicious length header can't make
@@ -26,11 +21,6 @@ public final class Framing {
         out.flush();
     }
 
-    /**
-     * Reads exactly one frame, regardless of what bytes it contains.
-     * Returns null if the connection closed cleanly between frames --
-     * our way of detecting "the client disconnected."
-     */
     public static String readFrame(DataInputStream in) throws IOException {
         int length;
         try {

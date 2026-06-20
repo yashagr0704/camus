@@ -9,18 +9,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * PHASE 8 -- a real embedded database (SQLite) for the broker's
- * "control plane" metadata: consumer offsets and group membership.
- * Message DATA stays exactly where it's always been -- CommitLog's
- * plain files -- this only handles the small, relational state.
- *
- * Every public method is synchronized -- one lock around the whole
- * connection, the same pattern as everywhere else in this project.
- * Metadata writes are tiny and infrequent compared to message
- * throughput, so this isn't a bottleneck the way the old Broker-wide
- * lock was.
- */
+
 public class MetadataStore implements AutoCloseable {
 
     private final Connection connection;
@@ -83,7 +72,6 @@ public class MetadataStore implements AutoCloseable {
         }
     }
 
-    /** Returns true only if this member was actually newly added (not already present). */
     public synchronized boolean addGroupMember(String topic, String groupName, String memberId) throws SQLException {
         String sql = "INSERT OR IGNORE INTO group_members (topic, group_name, member_id) VALUES (?, ?, ?)";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -94,7 +82,6 @@ public class MetadataStore implements AutoCloseable {
         }
     }
 
-    /** Returns true only if a row was actually removed (member really existed). */
     public synchronized boolean removeGroupMember(String topic, String groupName, String memberId) throws SQLException {
         String sql = "DELETE FROM group_members WHERE topic = ? AND group_name = ? AND member_id = ?";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {

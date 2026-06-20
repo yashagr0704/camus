@@ -8,13 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
 
-/**
- * PHASE 9 -- a follower broker. It's a completely normal Server (you
- * can connect a Client to it and CONSUME directly), running on its own
- * port and its own data directory, PLUS a background thread per
- * partition continuously fetching new records from the leader and
- * appending them to its own local log.
- */
+
 public class FollowerServer {
 
     private static final String LEADER_HOST = "localhost";

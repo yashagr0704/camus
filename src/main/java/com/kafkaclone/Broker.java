@@ -70,7 +70,6 @@ public class Broker {
         return groupFor(topic, groupName).assignmentFor(memberId);
     }
 
-    /** Raw read by exact offset -- no consumer name, no pending/ack bookkeeping. What FETCH uses. */
     public FetchResult fetch(String topic, int partition, long offset) throws IOException {
         CommitLog log = logFor(topic, partition);
         if (offset >= log.endOffset()) {
@@ -82,7 +81,6 @@ public class Broker {
         return new FetchResult(message, nextOffset);
     }
 
-    /** Appends directly to a SPECIFIC partition with no partition selection -- what a follower uses to mirror exactly what the leader wrote. */
     public void appendReplicated(String topic, int partition, String message) throws IOException {
         logFor(topic, partition).append(message.getBytes(StandardCharsets.UTF_8));
     }
